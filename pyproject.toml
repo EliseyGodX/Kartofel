@@ -1,0 +1,109 @@
+[project]
+name = "kartofel"
+version = "0.0.0"
+description = ""
+authors = [{ name = "EliseyGodX" }]
+requires-python = ">=3.14, <4.0"
+readme = "README.md"
+dependencies = [
+    "pydantic (>=2.14.0,<3.0.0)",
+    "colorama (>=0.4.6,<0.5.0)",
+    "aiohttp (>=3.14.5,<4.0.0)",
+    "textual (>=8.2.8,<9.0.0)",
+]
+
+[dependency-groups]
+dev = ["ruff (>=0.17.0,<0.18.0)"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+package-mode = false
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+preview = true
+select = [
+    "ERA",
+    "YTT",
+    "ANN",
+    "ASYNC",
+    "S",
+    "BLE",
+    "FBT",
+    "B",
+    "A",
+    "COM",
+    "C4",
+    "DTZ",
+    "T10",
+    "FIX",
+    "FA",
+    "INT",
+    "LOG",
+    "G",
+    "INP",
+    "PIE",
+    "T20",
+    "PYI",
+    "PT",
+    "Q",
+    "RSE",
+    "RET",
+    "SLF",
+    "SIM",
+    "SLOT",
+    "TD",
+    "TC",
+    "ARG",
+    "PTH",
+    "FLY",
+    "C90",
+    "NPY",
+    "PD",
+    "N",
+    "PERF",
+    "E",
+    "W",
+    "F",
+    "PL",
+    "UP",
+    "FURB",
+    "RUF",
+    "TRY",
+    "I",
+]
+ignore = [
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "raise-vanilla-args",
+    "logging-f-string",
+    "missing-todo-link",
+    "too-many-public-methods",
+    "boolean-type-hint-positional-argument",
+    "builtin-argument-shadowing",
+    "missing-type-kwargs",
+    "implicit-namespace-package",
+    "async-function-with-timeout",
+    "boolean-default-value-positional-argument",
+    "lambda-assignment",
+    "superfluous-else-return",
+    "superfluous-else-raise",
+    "hardcoded-password-func-arg",
+    "blind-except",
+    "print",
+    "manual-list-comprehension",
+    "too-many-boolean-expressions",
+]
+
+[tool.ruff.lint.flake8-bandit]
+check-typed-exception = true
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
