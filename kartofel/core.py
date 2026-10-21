@@ -1,116 +1,80 @@
 import asyncio
 import math
 import queue
+import random
 import threading
 import time
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from kartofel_print import KartofelPrint, KartofelPrintStateEnum
 
 from kartofel.exc import (
     KartofelNotUniqueIdError,
-    KartofelSessionCreatedError,
-    KartofelSessionNotCreatedError,
+    KartofelPrintTimeoutError,
 )
+from kartofel.kartofel_print import (
+    BaseKartofelPrint,
+    KartofelPrint,
+    KartofelPrintStateEnum,
+)
+from kartofel.progress import KartofelProgress
 from kartofel.settings import (
     DEFAULT_R_ID,
     KartofelModeEnum,
-    KartofelProgress,
     KartofelRequest,
     KartofelRequestPack,
+    KartofelSettings,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from settings import KartofelSettings
-
-    from kartofel.types import RequestRecord, TableName
+    from kartofel.types import RequestRecord
 
 
 class Kartofel:
 
-    def __init__(self, settings: KartofelSettings) -> None:
+    def __init__(
+        self,
+        settings: Any | KartofelSettings,  # ruff: ignore[any-type]
+        print_class: type[BaseKartofelPrint] = KartofelPrint,
+    ) -> None:
+        if not isinstance(settings, KartofelSettings):
+            self.settings = KartofelSettings.model_validate(settings)
         self.settings = self.update_r_ids(settings)
+        self.print_class = print_class
         self.request_que: queue.Queue[RequestRecord] = queue.Queue()
+        self.errors_que: queue.Queue[str] = queue.Queue()
         self.progress = KartofelProgress()
         self.progress_lock = threading.Lock()
         self.print_event = threading.Event()
         self.r_print_event = threading.Event()
         self.db_event = threading.Event()
         self.r_db_event = threading.Event()
+        self.emergency_event = threading.Event()
         self.tasks: list[asyncio.Task] = []
+        self.print_thread: threading.Thread
+        self.db_thread: threading.Thread
 
-    async def __aenter__(self) -> Self:
-        await self.create_session()
-        return self
+    async def start(self) -> None:
+        self.create_session()
+        try:
+            self.create_threads()
+            await self.modes_launcher()
+        except BaseException:
+            self.emergency_event.set()
+            raise
+        else:
+            self.set_close_print_state()
+        finally:
+            await asyncio.to_thread(self.print_thread.join)
+            await self.close_session()
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # ruff: ignore[missing-type-function-argument]
-        await self.close_session()
+    ###
+    # MODES METHODS
+    ###
 
-    async def create_session(self) -> None:
-        session = getattr(self, 'session', None)
-        if session is not None and not session.closed:
-            raise KartofelSessionCreatedError
-
-        self.session = aiohttp.ClientSession(
-            base_url=self.settings.base_url,
-            connector=aiohttp.TCPConnector(
-                limit=self.settings.connection_limit,
-                ttl_dns_cache=self.settings.ttl_dns_cache,
-                keepalive_timeout=self.settings.connection_keepalive_timeout,
-            ),
-            timeout=aiohttp.ClientTimeout(
-                total=self.settings.request_timeout,
-            ),
-            auto_decompress=False,
-        )
-
-    def block_print(self, func: Callable) -> None:
-        self.r_print_event.clear()
-        with self.progress_lock:
-            func()
-        self.r_print_event.wait()
-        self.r_print_event.clear()
-
-    def set_start_print_state(self) -> None:
-        def f() -> None:
-            self.progress.state = KartofelPrintStateEnum.START
-        self.block_print(f)
-
-    def set_mode_print_state(self) -> None:
-        with self.progress_lock:
-            self.progress.state = KartofelPrintStateEnum.MODE
-
-    def set_close_print_state(self) -> None:
-        def f() -> None:
-            self.progress.state = KartofelPrintStateEnum.CLOSE
-        self.block_print(f)
-
-    def increment_requests_count(self) -> None:
-        with self.progress_lock:
-            if self.progress.requests_count:
-                self.progress.requests_count += 1
-
-    async def close_session(self) -> None:
-        await self.session.close()
-
-    async def start(self) -> TableName:
-        session = getattr(self, 'session', None)
-        if session is None or session.closed:
-            raise KartofelSessionNotCreatedError
-
-        self.print_thread = threading.Thread(
-            target=self.thread_print,
-            name='Thread-Print',
-        )
-        self.set_start_print_state()
-        self.db_thread = threading.Thread(
-            target=self.thread_db,
-            name='Thread-DB',
-        )
-
+    async def modes_launcher(self) -> None:
         self.set_mode_print_state()
         for mode in self.settings.modes:
             match mode.mode:
@@ -127,7 +91,9 @@ class Kartofel:
                         self.progress.mode = KartofelModeEnum.STEADY
                         self.progress.total_duration = mode.duration
                         self.progress.requests_count = 0
-                        self.progress.total_requests_count = None
+                        self.progress.total_requests_count = int(
+                            mode.rps * mode.duration,
+                        )
                         self.progress.additional_mode_parameters = None
                     await self.steady_mode(
                         rps=mode.rps,
@@ -154,7 +120,7 @@ class Kartofel:
                     )
                 case KartofelModeEnum.SPIKE:
                     with self.progress_lock:
-                        self.progress.mode = KartofelModeEnum.STEADY
+                        self.progress.mode = KartofelModeEnum.SPIKE
                         self.progress.total_duration = None
                         self.progress.requests_count = 0
                         self.progress.total_requests_count = mode.count
@@ -163,22 +129,6 @@ class Kartofel:
                         r_pack=mode.requests,
                         count=mode.count,
                     )
-
-        self.set_close_print_state()
-        return '...'
-
-    def thread_print(self) -> None:
-        kprint = KartofelPrint(
-            kartofel_settings=self.settings,
-            progress=self.progress,
-            progress_lock=self.progress_lock,
-            print_event=self.print_event,
-            r_print_event=self.r_print_event,
-        )
-        kprint.tread()
-
-    def thread_db(self) -> None:
-        ...
 
     async def sleep_mode(self, duration: float) -> None:  # ruff: ignore[no-self-use]
         await asyncio.sleep(duration)
@@ -216,50 +166,121 @@ class Kartofel:
         requests = self.distribute_requests(r_pack, count)
         await self.requests(requests)
 
-    async def scheduler(
-        self,
-        rps: int,
-        duration: float,
-        r_pack: list[KartofelRequestPack],
-    ) -> None:
-        pack_delay = max(
-            1 / rps,
-            self.settings.min_request_pack_delay,
+    ###
+    # AIOHTTP METHODS
+    ###
+
+    def create_session(self) -> None:
+        self.session = aiohttp.ClientSession(
+            base_url=self.settings.base_url,
+            connector=aiohttp.TCPConnector(
+                limit=self.settings.connection_limit,
+                ttl_dns_cache=self.settings.ttl_dns_cache,
+                keepalive_timeout=self.settings.connection_keepalive_timeout,
+            ),
+            timeout=aiohttp.ClientTimeout(
+                total=self.settings.request_timeout,
+            ),
+            auto_decompress=False,
         )
-        total_requests = math.ceil(rps * duration)
-        iterations = max(1, math.ceil(duration / pack_delay))
-        requests = self.distribute_requests(r_pack, total_requests)
-        pack_delay_ns = int(pack_delay * 1_000_000_000)
-        sent = 0
-        with self.progress_lock:
-            self.progress.requests_count = iterations
 
-        start_ns = time.perf_counter_ns()
-        for i in range(iterations):
-            batch_end = (total_requests * (i + 1)) // iterations
-            batch = requests[sent:batch_end]
-            sent = batch_end
-            if batch:
-                await self.requests(batch, is_wait_tasks=False)
-            if i + 1 < iterations:
-                deadline = start_ns + (i + 1) * pack_delay_ns
-                while True:
-                    remaining_ns = deadline - time.perf_counter_ns()
-                    if remaining_ns <= 0:
-                        break
-                    await asyncio.sleep(remaining_ns / 1_000_000_000)
+    async def close_session(self) -> None:
+        await self.session.close()
 
-        await self.wait_tasks()
+    ###
+    # ASYNCIO METHODS
+    ###
 
-    async def requests(
+    async def wait_tasks(self) -> None:
+        if self.tasks:
+            await asyncio.gather(*self.tasks)
+        self.tasks.clear()
+
+    ###
+    # THREADS METHODS
+    ###
+
+    def create_threads(self) -> None:
+        self.print_thread = threading.Thread(
+            target=self.thread_print_launch,
+            name='Thread-Print',
+        )
+        self.print_thread.start()
+        self.set_start_print_state()
+
+        self.db_thread = threading.Thread(
+            target=self.thread_db_launch,
+            name='Thread-DB',
+        )
+
+    ###
+    # PRINT THREAD METHODS
+    ###
+
+    def thread_print_launch(self) -> None:
+        kprint = self.print_class(
+            kartofel_settings=self.settings,
+            progress=self.progress,
+            progress_lock=self.progress_lock,
+            errors_que=self.errors_que,
+            print_event=self.print_event,
+            r_print_event=self.r_print_event,
+            emergency_event=self.emergency_event,
+        )
+        kprint.thread()
+
+    def block_print(
         self,
-        rs: tuple[KartofelRequest, ...],
-        is_wait_tasks: bool = True,
-        ) -> None:
-        for r in rs:
-            self.tasks.append(asyncio.create_task(self.request(r)))
-        if is_wait_tasks:
-            await self.wait_tasks()
+        func: Callable,
+        timeout: float | None = None,
+    ) -> None:
+        self.r_print_event.clear()
+        with self.progress_lock:
+            func()
+        if not self.r_print_event.wait(timeout):
+            raise KartofelPrintTimeoutError
+        self.r_print_event.clear()
+
+    def set_start_print_state(self) -> None:
+        def f() -> None:
+            self.progress.state = KartofelPrintStateEnum.START
+        if self.settings.print_thread_tick < 1:
+            timeout = 2
+        else:
+            timeout = self.settings.print_thread_tick * 2
+        self.block_print(f, timeout)
+
+    def set_mode_print_state(self) -> None:
+        with self.progress_lock:
+            self.progress.state = KartofelPrintStateEnum.MODE
+
+    def set_close_print_state(self) -> None:
+        def f() -> None:
+            self.progress.state = KartofelPrintStateEnum.CLOSE
+        if self.settings.print_thread_tick < 1:
+            timeout = 2
+        else:
+            timeout = self.settings.print_thread_tick * 2
+        self.block_print(f, timeout)
+
+    def increment_requests_count(self) -> None:
+        with self.progress_lock:
+            if self.progress.requests_count is not None:
+                self.progress.requests_count += 1
+
+    def put_error(self, error: str) -> None:
+        self.errors_que.put(error)
+
+    ###
+    # DB THREAD METHODS
+    ###
+
+    def thread_db_launch(self) -> None:
+        ...
+
+    ###
+    # REQUESTS METHODS
+    ###
 
     async def request(self, r: KartofelRequest) -> None:
         start = time.perf_counter_ns()
@@ -288,16 +309,58 @@ class Kartofel:
 
         except BaseException as exc:
             is_error = True
-            print(exc)
+            self.put_error(str(exc))
 
         finally:
             self.request_que.put((is_error, is_timeout, start, end, status, r.id))
             self.increment_requests_count()
 
-    async def wait_tasks(self) -> None:
-        if self.tasks:
-            await asyncio.gather(*self.tasks)
-        self.tasks.clear()
+    async def requests(
+        self,
+        rs: tuple[KartofelRequest, ...],
+        is_wait_tasks: bool = True,
+        ) -> None:
+        for r in rs:
+            self.tasks.append(asyncio.create_task(self.request(r)))
+        if is_wait_tasks:
+            await self.wait_tasks()
+
+    async def scheduler(
+        self,
+        rps: int,
+        duration: float,
+        r_pack: list[KartofelRequestPack],
+    ) -> None:
+        pack_delay = max(
+            1 / rps,
+            self.settings.min_request_pack_delay,
+        )
+        total_requests = math.ceil(rps * duration)
+        iterations = max(1, math.ceil(duration / pack_delay))
+        requests = self.distribute_requests(r_pack, total_requests)
+        pack_delay_ns = int(pack_delay * 1_000_000_000)
+        sent = 0
+
+        start_ns = time.perf_counter_ns()
+        for i in range(iterations):
+            batch_end = (total_requests * (i + 1)) // iterations
+            batch = requests[sent:batch_end]
+            sent = batch_end
+            if batch:
+                await self.requests(batch, is_wait_tasks=False)
+            if i + 1 < iterations:
+                deadline = start_ns + (i + 1) * pack_delay_ns
+                while True:
+                    remaining_ns = deadline - time.perf_counter_ns()
+                    if remaining_ns <= 0:
+                        break
+                    await asyncio.sleep(remaining_ns / 1_000_000_000)
+
+        await self.wait_tasks()
+
+    ###
+    # STATIC METHODS
+    ###
 
     @staticmethod
     def distribute_requests(
@@ -327,6 +390,7 @@ class Kartofel:
                 pack.request
                 for _ in range(quantity)
             )
+        random.shuffle(requests)
         return tuple(requests)
 
     @staticmethod

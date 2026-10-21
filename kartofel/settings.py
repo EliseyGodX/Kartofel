@@ -1,6 +1,5 @@
 # ruff: file-ignore[magic-value-comparison]
 
-import dataclasses
 import json
 import re
 from collections.abc import Mapping  # ruff: ignore[typing-only-standard-library-import]
@@ -12,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from kartofel.enums import (
     KartofelHTTPMethodEnum,
     KartofelModeEnum,
-    KartofelPrintStateEnum,
 )
 
 type ModeSettings = (
@@ -165,16 +163,6 @@ class KartofelRequestPack(BaseModel):
     request: KartofelRequest
 
 
-@dataclasses.dataclass
-class KartofelProgress:
-    state: KartofelPrintStateEnum | None = None
-    mode: KartofelModeEnum | None = None
-    total_duration: float | None = None
-    requests_count: int | None = None
-    total_requests_count: int | None = None
-    additional_mode_parameters: dict[str, str] | None = None
-
-
 class KartofelSettings(BaseModel):
     base_url: str
     modes: list[
@@ -188,7 +176,7 @@ class KartofelSettings(BaseModel):
     connection_keepalive_timeout: float = Field(30.0, gt=0)
     request_timeout: float = Field(10.0, gt=0)
     min_request_pack_delay: float = Field(0.15, gt=0)
-    print_thread_tick_timeout: float = Field(1, gt=0)
+    print_thread_tick: float = Field(1, gt=0)
 
     @field_validator('base_url')
     @classmethod
