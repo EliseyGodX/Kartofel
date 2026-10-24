@@ -2,10 +2,10 @@ from enum import StrEnum
 
 
 class KartofelModeEnum(StrEnum):
-    SLEEP = 'sleep'
-    STEADY = 'steady'
-    RAMP = 'ramp'
-    SPIKE = 'spike'
+    SLEEP = 'SLEEP'
+    STEADY = 'STEADY'
+    RAMP = 'RAMP'
+    SPIKE = 'SPIKE'
 
 
 class KartofelHTTPMethodEnum(StrEnum):

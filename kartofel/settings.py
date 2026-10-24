@@ -12,6 +12,7 @@ from kartofel.enums import (
     KartofelHTTPMethodEnum,
     KartofelModeEnum,
 )
+from kartofel.kartofel_print import datetime
 
 type ModeSettings = (
     SleepModeSettings
@@ -175,8 +176,14 @@ class KartofelSettings(BaseModel):
     ttl_dns_cache: int = Field(120, ge=0)
     connection_keepalive_timeout: float = Field(30.0, gt=0)
     request_timeout: float = Field(10.0, gt=0)
-    min_request_pack_delay: float = Field(0.15, gt=0)
-    print_thread_tick: float = Field(1, gt=0)
+    min_request_pack_delay: float = Field(0.1, gt=0)
+    print_thread_tick: float = Field(1.0, gt=0)
+    db_path: str = Field(
+        f'kartofel-{datetime.now().strftime("%H-%M-%S")}.db',
+        min_length=1,
+    )
+    db_connect_timeout: float = Field(4, gt=0)
+    db_thread_tick:  float = Field(3.0, gt=0)
 
     @field_validator('base_url')
     @classmethod
@@ -205,13 +212,13 @@ class KartofelSettings(BaseModel):
 
 
 class BaseModeSettings(BaseModel):
-    requests: list[KartofelRequestPack] = Field(min_length=1)
+    request_packs: list[KartofelRequestPack] = Field(min_length=1)
 
 
 class SleepModeSettings(BaseModeSettings):
     mode: Literal[KartofelModeEnum.SLEEP] = KartofelModeEnum.SLEEP
     duration: float = Field(gt=0)
-    requests: list[KartofelRequestPack] = Field(
+    request_packs: list[KartofelRequestPack] = Field(
         default_factory=list,
         max_length=0,
     )

@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 
 from kartofel.exc import (
+    KartofelDBTimeoutError,
     KartofelNotUniqueIdError,
     KartofelPrintTimeoutError,
 )
+from kartofel.kartofel_db import BaseKartofelDB, KartofelDB
 from kartofel.kartofel_print import (
     BaseKartofelPrint,
     KartofelPrint,
@@ -38,11 +40,13 @@ class Kartofel:
         self,
         settings: Any | KartofelSettings,  # ruff: ignore[any-type]
         print_class: type[BaseKartofelPrint] = KartofelPrint,
+        db_class: type[BaseKartofelDB] = KartofelDB,
     ) -> None:
         if not isinstance(settings, KartofelSettings):
             self.settings = KartofelSettings.model_validate(settings)
         self.settings = self.update_r_ids(settings)
         self.print_class = print_class
+        self.db_class = db_class
         self.request_que: queue.Queue[RequestRecord] = queue.Queue()
         self.errors_que: queue.Queue[str] = queue.Queue()
         self.progress = KartofelProgress()
@@ -51,6 +55,7 @@ class Kartofel:
         self.r_print_event = threading.Event()
         self.db_event = threading.Event()
         self.r_db_event = threading.Event()
+        self.close_db_event = threading.Event()
         self.emergency_event = threading.Event()
         self.tasks: list[asyncio.Task] = []
         self.print_thread: threading.Thread
@@ -66,6 +71,7 @@ class Kartofel:
             raise
         else:
             self.set_close_print_state()
+            self.close_db()
         finally:
             await asyncio.to_thread(self.print_thread.join)
             await self.close_session()
@@ -94,11 +100,13 @@ class Kartofel:
                         self.progress.total_requests_count = int(
                             mode.rps * mode.duration,
                         )
-                        self.progress.additional_mode_parameters = None
+                        self.progress.additional_mode_parameters = {
+                            'rps': str(mode.rps),
+                        }
                     await self.steady_mode(
                         rps=mode.rps,
                         duration=mode.duration,
-                        r_pack=mode.requests,
+                        r_pack=mode.request_packs,
                     )
                 case KartofelModeEnum.RAMP:
                     with self.progress_lock:
@@ -113,7 +121,7 @@ class Kartofel:
                         }
                     await self.ramp_mode(
                         duration=mode.duration,
-                        r_pack=mode.requests,
+                        r_pack=mode.request_packs,
                         start_rps=mode.start_rps,
                         end_rps=mode.end_rps,
                         rps_step=mode.rps_step,
@@ -126,9 +134,11 @@ class Kartofel:
                         self.progress.total_requests_count = mode.count
                         self.progress.additional_mode_parameters = None
                     await self.spike_mode(
-                        r_pack=mode.requests,
+                        r_pack=mode.request_packs,
                         count=mode.count,
                     )
+            self.print_event.set()
+            self.db_event.set()
 
     async def sleep_mode(self, duration: float) -> None:  # ruff: ignore[no-self-use]
         await asyncio.sleep(duration)
@@ -212,6 +222,8 @@ class Kartofel:
             target=self.thread_db_launch,
             name='Thread-DB',
         )
+        self.close_db_event.clear()
+        self.db_thread.start()
 
     ###
     # PRINT THREAD METHODS
@@ -227,7 +239,7 @@ class Kartofel:
             r_print_event=self.r_print_event,
             emergency_event=self.emergency_event,
         )
-        kprint.thread()
+        kprint.launch()
 
     def block_print(
         self,
@@ -276,7 +288,24 @@ class Kartofel:
     ###
 
     def thread_db_launch(self) -> None:
-        ...
+        kdb = self.db_class(
+            kartofel_settings=self.settings,
+            request_que=self.request_que,
+            db_event=self.db_event,
+            r_db_event=self.r_db_event,
+            close_db_event=self.close_db_event,
+            emergency_event=self.emergency_event,
+        )
+        self.r_db_event.clear()
+        kdb.launch()
+        if not self.r_db_event.wait(self.settings.db_connect_timeout):
+            raise KartofelDBTimeoutError
+
+    def close_db(self) -> None:
+        self.r_db_event.clear()
+        self.close_db_event.set()
+        if not self.r_db_event.wait(self.settings.db_connect_timeout):
+            raise KartofelDBTimeoutError
 
     ###
     # REQUESTS METHODS
@@ -397,7 +426,7 @@ class Kartofel:
     def update_r_ids(settings: KartofelSettings) -> KartofelSettings:
         ids = set()
         for mode in settings.modes:
-            for pack in mode.requests:
+            for pack in mode.request_packs:
                 id = pack.request.id  # ruff: ignore[builtin-variable-shadowing]
                 if id != DEFAULT_R_ID:
                     if id in ids:
@@ -406,7 +435,7 @@ class Kartofel:
 
         i = 1
         for mode in settings.modes:
-            for pack in mode.requests:
+            for pack in mode.request_packs:
                 if pack.request.id == DEFAULT_R_ID:
                     while i in ids:
                         i += 1

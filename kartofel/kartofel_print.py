@@ -38,7 +38,7 @@ class BaseKartofelPrint(ABC):
         ...
 
     @abstractmethod
-    def thread(self) -> None:
+    def launch(self) -> None:
         ...
 
 
@@ -69,13 +69,13 @@ class KartofelPrint(BaseKartofelPrint):
         self.r_print_event = r_print_event
         self.r_print_event.clear()
         self.emergency_event = emergency_event
-        self.__is_started = False
         self.started_at: datetime | None = None
         self.started_monotonic: float | None = None
         self.live: Live | None = None
+        self.__has_started = False
 
-    def thread(self) -> None:
-        if self.__is_started:
+    def launch(self) -> None:
+        if self.__has_started:
             raise KartofelPrintClosedError
 
         while True:
@@ -95,20 +95,20 @@ class KartofelPrint(BaseKartofelPrint):
 
             match state:
                 case KartofelPrintStateEnum.START:
-                    if not self.__is_started:
-                        self.__is_started = True
-                        self.start()
+                    if not self.__has_started:
+                        self.__has_started = True
+                        self.start_state()
                         self.started_at = datetime.now().astimezone()
                         self.started_monotonic = monotonic()
                         self.r_print_event.set()
                 case KartofelPrintStateEnum.MODE:
-                    self.mode()
+                    self.mode_state()
                 case KartofelPrintStateEnum.CLOSE:
-                    self.close()
+                    self.close_state()
                     self.r_print_event.set()
                     break
 
-    def start(self) -> None:
+    def start_state(self) -> None:
         self.live = Live(
             self.render(),
             console=self.console,
@@ -117,12 +117,12 @@ class KartofelPrint(BaseKartofelPrint):
         )
         self.live.start()
 
-    def mode(self) -> None:
+    def mode_state(self) -> None:
         if not self.live:
             raise KartofelPrintNotStartedError
         self.live.update(self.render())
 
-    def close(self) -> None:
+    def close_state(self) -> None:
         if not self.live:
             raise KartofelPrintNotStartedError
         finished_at = datetime.now().astimezone()
@@ -202,7 +202,7 @@ class KartofelPrint(BaseKartofelPrint):
         mode_index = 0
         for mode_item in self.modes:
             mode_index += 1
-            config.append(f'{mode_item.value.upper()} -> ', style='bold')
+            config.append(f'{mode_item.value} -> ', style='bold')
             if mode_index == 6:  # ruff: ignore[magic-value-comparison]
                 mode_index = 0
                 config.append('\n')
@@ -217,7 +217,7 @@ class KartofelPrint(BaseKartofelPrint):
             progress_lines = []
             if mode is not None:
                 progress_lines.append(
-                    Text.from_markup(f'Mode: [bold]{mode.upper()}[/]'),
+                    Text.from_markup(f'Mode: [bold]{mode}[/]'),
                 )
 
             if (
